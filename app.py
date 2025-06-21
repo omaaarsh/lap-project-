@@ -107,26 +107,36 @@ if uploaded_zip:
 
             # --- HEATMAP ---
             consistent_genes = consistently_up_genes.union(consistently_down_genes)
+            
             # Prepare heatmap data
             heatmap_data = merged_df.loc[consistent_genes].copy()
-            heatmap_data = heatmap_data.fillna(0)
-            heatmap_data = heatmap_data.replace([np.inf, -np.inf], 0)
-
-            row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
-            col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
-
-            st.subheader("🧯 Hierarchical Clustering Heatmap")
-            fig = sns.clustermap(
-                heatmap_data,
-                row_linkage=row_linkage,
-                col_linkage=col_linkage,
-                cmap='RdBu_r',
-                center=0,
-                linewidths=0.5,
-                figsize=(10, 10)
-            )
-            st.pyplot(fig.fig)
-            plt.clf()
+            
+            # Clean data: replace Inf with NaN
+            heatmap_data.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # Drop any rows or columns that contain NaNs
+            heatmap_data.dropna(axis=0, how='any', inplace=True)
+            heatmap_data.dropna(axis=1, how='any', inplace=True)
+            
+            # Optional: Alert if heatmap is too small
+            if heatmap_data.shape[0] < 2 or heatmap_data.shape[1] < 2:
+                st.warning("⚠️ Not enough consistent gene expression data to create heatmap.")
+            else:
+                row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
+                col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
+            
+                st.subheader("🧯 Hierarchical Clustering Heatmap")
+                fig = sns.clustermap(
+                    heatmap_data,
+                    row_linkage=row_linkage,
+                    col_linkage=col_linkage,
+                    cmap='RdBu_r',
+                    center=0,
+                    linewidths=0.5,
+                    figsize=(10, 10)
+                )
+                st.pyplot(fig.fig)
+                plt.clf()
 
             # --- ENRICHMENT ANALYSIS ---
             st.subheader("🔬 Pathway Enrichment (Enrichr via GSEApy)")
