@@ -107,7 +107,10 @@ if uploaded_zip:
 
             # --- HEATMAP ---
             consistent_genes = consistently_up_genes.union(consistently_down_genes)
-            heatmap_data = merged_df.loc[consistent_genes].fillna(0)
+            # Prepare heatmap data
+            heatmap_data = merged_df.loc[consistent_genes].copy()
+            heatmap_data = heatmap_data.fillna(0)
+            heatmap_data = heatmap_data.replace([np.inf, -np.inf], 0)
 
             row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
             col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
