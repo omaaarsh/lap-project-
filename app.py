@@ -34,16 +34,19 @@ def extract_nested_zip_files(zip_file) -> dict:
     with zipfile.ZipFile(zip_file) as main_zip:
         for inner_name in main_zip.namelist():
             if inner_name.endswith('.zip'):
-                with main_zip.open(inner_name) as nested_zip_file:
-                    nested_zip_bytes = io.BytesIO(nested_zip_file.read())
-                    with zipfile.ZipFile(nested_zip_bytes) as nested_zip:
-                        drug_name = os.path.splitext(os.path.basename(inner_name))[0]
-                        drug_data[drug_name] = []
-                        for file_name in nested_zip.namelist():
-                            if file_name.endswith(".csv"):
-                                with nested_zip.open(file_name) as csv_file:
-                                    file_bytes = io.BytesIO(csv_file.read())
-                                    drug_data[drug_name].append((file_name, file_bytes))
+                try:
+                    with main_zip.open(inner_name) as nested_zip_file:
+                        nested_zip_bytes = io.BytesIO(nested_zip_file.read())
+                        with zipfile.ZipFile(nested_zip_bytes) as nested_zip:
+                            drug_name = os.path.splitext(os.path.basename(inner_name))[0]
+                            drug_data[drug_name] = []
+                            for file_name in nested_zip.namelist():
+                                if file_name.endswith(".csv"):
+                                    with nested_zip.open(file_name) as csv_file:
+                                        file_bytes = io.BytesIO(csv_file.read())
+                                        drug_data[drug_name].append((file_name, file_bytes))
+                except zipfile.BadZipFile:
+                    st.warning(f"⚠️ Skipped invalid ZIP file: {inner_name}")
     return drug_data
 
 # --- UPLOAD MAIN ZIP ---
