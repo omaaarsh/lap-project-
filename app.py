@@ -117,7 +117,7 @@ if st.button("Run Analysis"):
                 return False
 
             enr.results.to_csv(os.path.join(output_folder, f"{label.lower()}_enrichment.csv"), index=False)
-            fig, ax = plt.subplots(figsize=(40, 15))
+            fig, ax = plt.subplots(figsize=(60, 25))
             barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{drug_name} - {label}", ax=ax)
             plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"))
             plt.close()
@@ -143,44 +143,59 @@ if st.button("Run Analysis"):
         gene_dfs = []
         for cell_line, df in cell_line_data.items():
             temp = df[['ID_geneid', 'Name_GeneSymbol', 'Value_LogDiffExp']].copy()
-            temp.rename(columns={'Value_LogDiffExp': cell_line}, inplace=True)
+            temp = temp.rename(columns={'Value_LogDiffExp': cell_line})
             gene_dfs.append(temp)
-
-        merged = reduce(lambda l, r: pd.merge(l, r, on=['ID_geneid', 'Name_GeneSymbol'], how='outer'), gene_dfs)
-        merged.set_index(['ID_geneid', 'Name_GeneSymbol'], inplace=True)
-
-        up_mask = (merged > log2fc_threshold).sum(axis=1)
-        down_mask = (merged < -log2fc_threshold).sum(axis=1)
-        min_consistent = int(len(cell_line_data) * (consistency_threshold / 100))
-
-        up_genes = up_mask[up_mask >= min_consistent].index
-        down_genes = down_mask[down_mask >= min_consistent].index
-        all_genes = up_genes.union(down_genes)
-
-        heatmap_data = merged.loc[all_genes].fillna(0)
+    
+        merged_df = reduce(lambda l, r: pd.merge(l, r, on=['ID_geneid', 'Name_GeneSymbol'], how='outer'), gene_dfs)
+        merged_df.set_index(['ID_geneid', 'Name_GeneSymbol'], inplace=True)
+    
+        cell_line_count = len(cell_line_data)
+        min_consistent = int(cell_line_count * (consistency_threshold / 100))
+        up_mask = (merged_df > log2fc_threshold).sum(axis=1)
+        down_mask = (merged_df < -log2fc_threshold).sum(axis=1)
+    
+        consistently_up = up_mask[up_mask >= min_consistent].index
+        consistently_down = down_mask[down_mask >= min_consistent].index
+    
+        consistent_genes = consistently_up.union(consistently_down)
+        heatmap_data = merged_df.loc[consistent_genes].copy()
+        heatmap_data = heatmap_data.replace([np.inf, -np.inf], 0).fillna(0)
         heatmap_data = heatmap_data.loc[:, heatmap_data.std() > 0]
-        if heatmap_data.shape[0] < 2 or heatmap_data.shape[1] < 2:
-            return False
+    
+        heatmap_ok = heatmap_data.shape[0] >= 2 and heatmap_data.shape[1] >= 2
+        up_ok = len(consistently_up) > 0
+        down_ok = len(consistently_down) > 0
+    
+        if heatmap_ok and up_ok and down_ok:
+            drug_folder = os.path.join(output_dir, drug_name)
+            os.makedirs(drug_folder, exist_ok=True)
+    
+            # Save heatmap
+            row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
+            col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
+            cg = sns.clustermap(
+                heatmap_data,
+                row_linkage=row_linkage,
+                col_linkage=col_linkage,
+                cmap='RdBu_r',
+                center=0,
+                linewidths=0.5,
+                figsize=(10, 10)
+            )
+            plt.title(f"{drug_name} - Hierarchical Clustering Heatmap")
+            plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"), bbox_inches='tight')
+            plt.clf()
+    
+            up_ok = run_enrichment(consistently_up, "Upregulated", drug_name, drug_folder)
+            down_ok = run_enrichment(consistently_down, "Downregulated", drug_name, drug_folder)
+    
+            if not up_ok or not down_ok:
+                shutil.rmtree(drug_folder)
+                return False  # Skipped due to incomplete enrichment
+            return True
 
-        drug_folder = os.path.join(ANALYSIS_FOLDER, drug_name)
-        os.makedirs(drug_folder, exist_ok=True)
-
-        row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
-        col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
-        sns.clustermap(heatmap_data, row_linkage=row_linkage, col_linkage=col_linkage,
-                       cmap='RdBu_r', center=0, linewidths=0.5, figsize=(10, 10))
-        plt.title(f"{drug_name} - Clustering Heatmap")
-        plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"))
-        plt.close()
-
-        up_success = run_enrichment(up_genes, "Upregulated", drug_name, drug_folder)
-        down_success = run_enrichment(down_genes, "Downregulated", drug_name, drug_folder)
-
-        if not (up_success or down_success):
-            shutil.rmtree(drug_folder)
-            return False
-
-        return True
+    else:
+        return False
 
     def zip_analysis_folder(drug_name):
         folder_path = os.path.join(ANALYSIS_FOLDER, drug_name)
