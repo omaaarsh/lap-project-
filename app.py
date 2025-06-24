@@ -193,9 +193,9 @@ if st.button("Run Analysis"):
                 shutil.rmtree(drug_folder)
                 return False  # Skipped due to incomplete enrichment
             return True
-
-    else:
-        return False
+    
+        else:
+            return False
 
     def zip_analysis_folder(drug_name):
         folder_path = os.path.join(ANALYSIS_FOLDER, drug_name)
