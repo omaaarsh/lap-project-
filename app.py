@@ -118,9 +118,8 @@ def run_enrichment(gene_index, label, drug_name, output_folder):
         enr.results.to_csv(os.path.join(output_folder, f"{label.lower()}_enrichment.csv"), index=False)
         fig, ax = plt.subplots(figsize=(100, 30))
         barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{drug_name} - {label}", ax=ax)
-        plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
-        plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"))
         plt.close()
         return True
     except Exception as e:
