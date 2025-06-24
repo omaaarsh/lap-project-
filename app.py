@@ -117,7 +117,7 @@ if st.button("Run Analysis"):
                 return False
 
             enr.results.to_csv(os.path.join(output_folder, f"{label.lower()}_enrichment.csv"), index=False)
-            fig, ax = plt.subplots(figsize=(10, 6))
+            fig, ax = plt.subplots(figsize=(30, 12))
             barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{drug_name} - {label}", ax=ax)
             plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"))
             plt.close()
