@@ -135,7 +135,7 @@ def analyze_zip(zip_path, drug_name):
                 with zipf.open(csv_name) as f:
                     df = pd.read_csv(f)
                     df = df[df['Significance_pvalue'] <= pvalue_threshold]
-                    cell_line = csv_name.split("_")[-1].replace(".csv", "")
+                    cell_line = file.name.split(" - ")[0].replace("Camptothecin", "").replace(".xls", "").strip()
                     cell_line_data[cell_line] = df
 
     if not cell_line_data:
