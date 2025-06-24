@@ -8,23 +8,26 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import streamlit as st
 from functools import reduce
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import pdist
 import gseapy as gp
 from gseapy.plot import barplot
+import streamlit as st
 
-# === 🗂️ Directories ===
+# === Streamlit UI ===
+st.title("🧬 Drug Gene Signature Analysis")
+compound = st.text_input("Compound Name", value="vorinostat")
+top_genes = st.number_input("Number of Top Genes", min_value=100, max_value=2000, value=1000, step=100)
+log2fc_threshold = st.slider("Log2 Fold Change Threshold", 0.1, 2.0, 1.0, 0.1)
+consistency_threshold = st.slider("Consistency Threshold (%)", 10, 100, 50, 5)
+pvalue_threshold = st.slider("p-value Threshold", 0.001, 0.1, 0.05, 0.001)
+
 OUTPUT_FOLDER = "output_zips"
-SKIPPED_FOLDER = "skipped_drug_raw_data"
 ANALYSIS_FOLDER = "drug_Analysis_results"
-
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-os.makedirs(SKIPPED_FOLDER, exist_ok=True)
 os.makedirs(ANALYSIS_FOLDER, exist_ok=True)
 
-# === 📥 Metadata ===
 def extract_concentration(d):
     conc_str = d.get("concentration", "").lower()
     match = re.match(r"(\d+(?:\.\d+)?)\s*u[mM]", conc_str)
@@ -58,7 +61,6 @@ def get_signature_metadata(compound_name):
         st.error(f"❌ Failed to get metadata: {e}")
         return []
 
-# === 📥 Gene Expression ===
 def get_signature_data(sig_ids, top_genes=1000):
     url = "https://www.ilincs.org/api/ilincsR/downloadSignature"
     payload = {
@@ -74,7 +76,6 @@ def get_signature_data(sig_ids, top_genes=1000):
         st.error(f"❌ Failed to get signature data: {e}")
         return []
 
-# === 💾 Save to ZIP ===
 def save_gene_data_to_zip(metadata, gene_df, output_zip_path):
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a") as zipf:
@@ -91,12 +92,9 @@ def save_gene_data_to_zip(metadata, gene_df, output_zip_path):
     with open(output_zip_path, "wb") as f:
         f.write(zip_buffer.getvalue())
 
-# === 📊 Enrichment ===
 def run_enrichment(gene_index, label, drug_name, output_folder):
     if isinstance(gene_index, pd.MultiIndex) and gene_index.empty:
-        st.warning(f"⚠️ No genes for enrichment in {label}")
         return False
-
     symbols = [g[1] for g in gene_index]
     try:
         enr = gp.enrichr(
@@ -109,17 +107,20 @@ def run_enrichment(gene_index, label, drug_name, output_folder):
         if enr.results.empty:
             return False
         enr.results.to_csv(os.path.join(output_folder, f"{label.lower()}_enrichment.csv"), index=False)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{drug_name} - {label}", ax=ax)
+        fig, ax = plt.subplots(figsize=(30, 12))
+        barplot(
+            enr.results.sort_values('Adjusted P-value').head(10),
+            title=f"{drug_name} - {label}",
+            ax=ax
+        )
         plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"))
         plt.close()
         return True
     except Exception as e:
-        st.warning(f"⚠️ Enrichment error: {e}")
+        st.warning(f"⚠️ Enrichment error for {label}: {e}")
         return False
 
-# === 📈 Analysis ===
-def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_threshold, pvalue_threshold):
+def analyze_zip(zip_path, drug_name):
     cell_line_data = {}
     with zipfile.ZipFile(zip_path, 'r') as zipf:
         for csv_name in zipf.namelist():
@@ -129,9 +130,7 @@ def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_thresho
                     df = df[df['Significance_pvalue'] <= pvalue_threshold]
                     cell_line = csv_name.split("_")[-1].replace(".csv", "")
                     cell_line_data[cell_line] = df
-
     if not cell_line_data:
-        st.error(f"{drug_name} ❌ No valid cell line data")
         return False
 
     gene_dfs = []
@@ -139,7 +138,6 @@ def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_thresho
         temp = df[['ID_geneid', 'Name_GeneSymbol', 'Value_LogDiffExp']].copy()
         temp.rename(columns={'Value_LogDiffExp': cell_line}, inplace=True)
         gene_dfs.append(temp)
-
     merged = reduce(lambda l, r: pd.merge(l, r, on=['ID_geneid', 'Name_GeneSymbol'], how='outer'), gene_dfs)
     merged.set_index(['ID_geneid', 'Name_GeneSymbol'], inplace=True)
 
@@ -154,7 +152,6 @@ def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_thresho
     heatmap_data = merged.loc[all_genes].fillna(0)
     heatmap_data = heatmap_data.loc[:, heatmap_data.std() > 0]
     if heatmap_data.shape[0] < 2 or heatmap_data.shape[1] < 2:
-        st.error(f"{drug_name} ❌ Insufficient heatmap data")
         return False
 
     drug_folder = os.path.join(ANALYSIS_FOLDER, drug_name)
@@ -164,43 +161,55 @@ def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_thresho
     col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
     sns.clustermap(heatmap_data, row_linkage=row_linkage, col_linkage=col_linkage,
                    cmap='RdBu_r', center=0, linewidths=0.5, figsize=(10, 10))
+    heatmap_path = os.path.join(drug_folder, f"{drug_name}_heatmap.png")
     plt.title(f"{drug_name} - Clustering Heatmap")
-    plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"))
+    plt.savefig(heatmap_path)
     plt.close()
 
-    up_success = run_enrichment(up_genes, "Upregulated", drug_name, drug_folder)
-    down_success = run_enrichment(down_genes, "Downregulated", drug_name, drug_folder)
+    up_ok = run_enrichment(up_genes, "Upregulated", drug_name, drug_folder)
+    down_ok = run_enrichment(down_genes, "Downregulated", drug_name, drug_folder)
 
-    if not (up_success or down_success):
+    if not (up_ok or down_ok):
         shutil.rmtree(drug_folder)
-        st.warning(f"{drug_name} ❌ No enrichment results")
         return False
-
-    st.success(f"{drug_name} ✅ Analysis complete")
     return True
 
-# === 🚀 Streamlit App ===
-st.title("🔬 Drug Gene Expression Analyzer")
-
-compound = st.text_input("Enter compound name (e.g. vorinostat):", "vorinostat")
-top_genes = st.number_input("Number of top genes to fetch", min_value=100, max_value=5000, step=100, value=1000)
-
-st.markdown("### ⚙️ Analysis Parameters")
-log2fc_threshold = st.number_input("Log2 Fold Change Threshold (log2FC)", min_value=0.0, max_value=5.0, step=0.1, value=1.0)
-consistency_threshold = st.slider("Minimum Consistency Across Cell Lines (%)", min_value=1, max_value=100, value=50, step=5)
-pvalue_threshold = st.number_input("Significance p-value Threshold", min_value=0.0, max_value=1.0, step=0.01, value=0.05)
-
-if st.button("Run Analysis"):
-    metadata = get_signature_metadata(compound)
-    if not metadata:
-        st.error(f"❌ No metadata found for {compound}")
-    else:
-        sig_ids = [m["SignatureId"] for m in metadata]
-        gene_data = get_signature_data(sig_ids, top_genes)
-        if not gene_data:
-            st.error(f"❌ No gene data for {compound}")
+# === Main execution ===
+if st.button("🔬 Run Analysis"):
+    with st.spinner("Running analysis..."):
+        metadata = get_signature_metadata(compound)
+        if not metadata:
+            st.error(f"No metadata found for {compound}")
         else:
-            gene_df = pd.DataFrame(gene_data)
-            zip_path = os.path.join(OUTPUT_FOLDER, f"{compound.replace(' ', '_')}.zip")
-            save_gene_data_to_zip(metadata, gene_df, zip_path)
-            analyze_gene_data(zip_path, compound, log2fc_threshold, consistency_threshold, pvalue_threshold)
+            sig_ids = [m["SignatureId"] for m in metadata]
+            gene_data = get_signature_data(sig_ids, top_genes)
+            if not gene_data:
+                st.error(f"No gene data found for {compound}")
+            else:
+                gene_df = pd.DataFrame(gene_data)
+                zip_path = os.path.join(OUTPUT_FOLDER, f"{compound.replace(' ', '_')}.zip")
+                save_gene_data_to_zip(metadata, gene_df, zip_path)
+                success = analyze_zip(zip_path, compound)
+                if success:
+                    st.success(f"✅ Analysis for {compound} completed!")
+
+                    with open(zip_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download Gene Data ZIP",
+                            data=f,
+                            file_name=os.path.basename(zip_path),
+                            mime="application/zip"
+                        )
+
+                    heatmap_path = os.path.join(ANALYSIS_FOLDER, compound, f"{compound}_heatmap.png")
+                    if os.path.exists(heatmap_path):
+                        st.image(heatmap_path, caption="Clustering Heatmap", use_column_width=True)
+                        with open(heatmap_path, "rb") as f:
+                            st.download_button(
+                                label="🖼️ Download Heatmap",
+                                data=f,
+                                file_name=os.path.basename(heatmap_path),
+                                mime="image/png"
+                            )
+                else:
+                    st.error("❌ Analysis failed.")
