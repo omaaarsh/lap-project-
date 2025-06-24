@@ -174,7 +174,7 @@ def analyze_zip(zip_path, drug_name):
         # Save heatmap
         row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
         col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
-        cg = sns.clustermap(
+        fig = sns.clustermap(
             heatmap_data,
             row_linkage=row_linkage,
             col_linkage=col_linkage,
@@ -183,6 +183,7 @@ def analyze_zip(zip_path, drug_name):
             linewidths=0.5,
             figsize=(10, 10)
         )
+        st.pyplot(fig.fig)
         plt.title(f"{drug_name} - Hierarchical Clustering Heatmap")
         plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"), bbox_inches='tight')
         plt.clf()
