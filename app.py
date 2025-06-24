@@ -1,169 +1,206 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
 import os
-import tempfile
-import seaborn as sns
+import re
+import io
+import zipfile
+import shutil
+import requests
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+import streamlit as st
 from functools import reduce
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import pdist
 import gseapy as gp
 from gseapy.plot import barplot
-import zipfile
-import io
 
-# --- STREAMLIT UI ---
-st.set_page_config(layout="wide")
-st.title("🧬 Consistent Gene Signature Analysis from Drug Treatment (ZIP Mode)")
-st.markdown("""
-Upload a **main ZIP file**, where each **sub-ZIP** represents one **drug**, and contains **CSV files for cell lines** treated with that drug.
+# === 🗂️ Directories ===
+OUTPUT_FOLDER = "output_zips"
+SKIPPED_FOLDER = "skipped_drug_raw_data"
+ANALYSIS_FOLDER = "drug_Analysis_results"
 
-🔹 Each inner file name should follow: `DrugName cell_line_name.xls - DrugName cell_line_name.xls.csv`  
-🔹 Each CSV must contain: `ID_geneid`, `Name_GeneSymbol`, `Value_LogDiffExp`, `Significance_pvalue`
-""")
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(SKIPPED_FOLDER, exist_ok=True)
+os.makedirs(ANALYSIS_FOLDER, exist_ok=True)
 
-# --- USER INPUT ---
-log2fc_threshold = st.sidebar.slider("log₂ Fold Change Threshold", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
-consistency_threshold = st.sidebar.slider("Cell Line Consistency Threshold (%)", min_value=30, max_value=100, value=50, step=10)
-pvalue_threshold = st.sidebar.slider("Significance P-Value Threshold", min_value=0.0, max_value=0.2, value=0.2, step=0.01)
+# === 📥 Metadata ===
+def extract_concentration(d):
+    conc_str = d.get("concentration", "").lower()
+    match = re.match(r"(\d+(?:\.\d+)?)\s*u[mM]", conc_str)
+    return float(match.group(1)) if match else -1
 
-# --- HELPER: Extract nested ZIPs ---
-def extract_nested_zip_files(zip_file) -> dict:
-    drug_data = {}
-    with zipfile.ZipFile(zip_file) as main_zip:
-        for inner_name in main_zip.namelist():
-            if inner_name.endswith('.zip'):
-                try:
-                    with main_zip.open(inner_name) as nested_zip_file:
-                        nested_zip_bytes = io.BytesIO(nested_zip_file.read())
-                        with zipfile.ZipFile(nested_zip_bytes) as nested_zip:
-                            drug_name = os.path.splitext(os.path.basename(inner_name))[0]
-                            drug_data[drug_name] = []
-                            for file_name in nested_zip.namelist():
-                                if file_name.endswith(".csv"):
-                                    with nested_zip.open(file_name) as csv_file:
-                                        file_bytes = io.BytesIO(csv_file.read())
-                                        drug_data[drug_name].append((file_name, file_bytes))
-                except zipfile.BadZipFile:
-                    st.warning(f"⚠️ Skipped invalid ZIP file: {inner_name}")
-    return drug_data
+def get_signature_metadata(compound_name):
+    url = f"https://www.ilincs.org/api/SignatureMeta/findTermWithSynonyms?term={compound_name}&library=LIB_5&limit=100"
+    try:
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        data = res.json()["data"]
+        tissue_groups = {}
+        for d in data:
+            tissue = d.get("tissue")
+            if tissue:
+                tissue_groups.setdefault(tissue, []).append(d)
+        selected_entries = []
+        for entries in tissue_groups.values():
+            ten_um = next((d for d in entries if d.get("concentration") == "10uM"), None)
+            selected_entries.append(ten_um if ten_um else max(entries, key=extract_concentration))
+        return [
+            {
+                "SignatureId": d["signatureid"],
+                "Perturbagen": d["compound"],
+                "Tissue": d["tissue"],
+                "CellLine": d["cellline"]
+            }
+            for d in selected_entries if d
+        ]
+    except Exception as e:
+        st.error(f"❌ Failed to get metadata: {e}")
+        return []
 
-# --- UPLOAD MAIN ZIP ---
-uploaded_zip = st.file_uploader("Upload main ZIP file with sub-ZIPs (one per drug):", type="zip")
+# === 📥 Gene Expression ===
+def get_signature_data(sig_ids, top_genes=1000):
+    url = "https://www.ilincs.org/api/ilincsR/downloadSignature"
+    payload = {
+        "sigID": ",".join(sig_ids),
+        "noOfTopGenes": top_genes,
+        "display": True
+    }
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=20)
+        return response.json().get("data", {}).get("signature", [])
+    except Exception as e:
+        st.error(f"❌ Failed to get signature data: {e}")
+        return []
 
-if uploaded_zip:
-    drug_files_map = extract_nested_zip_files(uploaded_zip)
-    
-    if not drug_files_map:
-        st.error("No sub-ZIP files with CSVs found.")
+# === 💾 Save to ZIP ===
+def save_gene_data_to_zip(metadata, gene_df, output_zip_path):
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "a") as zipf:
+        for row in metadata:
+            sig_id = row['SignatureId']
+            tissue = (row['Tissue'] or "UnknownTissue").replace(" ", "_")
+            cell_line = (row['CellLine'] or "UnknownCell").replace(" ", "_")
+            perturbagen = (row['Perturbagen'] or "Unknown").replace(" ", "_")
+            matched = gene_df[gene_df['signatureID'] == sig_id]
+            if matched.empty:
+                continue
+            filename = f"{perturbagen}_{tissue}_{cell_line}.csv"
+            zipf.writestr(filename, matched.to_csv(index=False).encode('utf-8'))
+    with open(output_zip_path, "wb") as f:
+        f.write(zip_buffer.getvalue())
+
+# === 📊 Enrichment ===
+def run_enrichment(gene_index, label, drug_name, output_folder):
+    if isinstance(gene_index, pd.MultiIndex) and gene_index.empty:
+        st.warning(f"⚠️ No genes for enrichment in {label}")
+        return False
+
+    symbols = [g[1] for g in gene_index]
+    try:
+        enr = gp.enrichr(
+            gene_list=symbols,
+            gene_sets=["KEGG_2021_Human", "Reactome_2022", "GO_Biological_Process_2023"],
+            organism='Human',
+            outdir=None,
+            cutoff=0.05
+        )
+        if enr.results.empty:
+            return False
+        enr.results.to_csv(os.path.join(output_folder, f"{label.lower()}_enrichment.csv"), index=False)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{drug_name} - {label}", ax=ax)
+        plt.savefig(os.path.join(output_folder, f"{label.lower()}_enrichment.png"))
+        plt.close()
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Enrichment error: {e}")
+        return False
+
+# === 📈 Analysis ===
+def analyze_gene_data(zip_path, drug_name, log2fc_threshold, consistency_threshold, pvalue_threshold):
+    cell_line_data = {}
+    with zipfile.ZipFile(zip_path, 'r') as zipf:
+        for csv_name in zipf.namelist():
+            if csv_name.endswith(".csv"):
+                with zipf.open(csv_name) as f:
+                    df = pd.read_csv(f)
+                    df = df[df['Significance_pvalue'] <= pvalue_threshold]
+                    cell_line = csv_name.split("_")[-1].replace(".csv", "")
+                    cell_line_data[cell_line] = df
+
+    if not cell_line_data:
+        st.error(f"{drug_name} ❌ No valid cell line data")
+        return False
+
+    gene_dfs = []
+    for cell_line, df in cell_line_data.items():
+        temp = df[['ID_geneid', 'Name_GeneSymbol', 'Value_LogDiffExp']].copy()
+        temp.rename(columns={'Value_LogDiffExp': cell_line}, inplace=True)
+        gene_dfs.append(temp)
+
+    merged = reduce(lambda l, r: pd.merge(l, r, on=['ID_geneid', 'Name_GeneSymbol'], how='outer'), gene_dfs)
+    merged.set_index(['ID_geneid', 'Name_GeneSymbol'], inplace=True)
+
+    up_mask = (merged > log2fc_threshold).sum(axis=1)
+    down_mask = (merged < -log2fc_threshold).sum(axis=1)
+    min_consistent = int(len(cell_line_data) * (consistency_threshold / 100))
+
+    up_genes = up_mask[up_mask >= min_consistent].index
+    down_genes = down_mask[down_mask >= min_consistent].index
+    all_genes = up_genes.union(down_genes)
+
+    heatmap_data = merged.loc[all_genes].fillna(0)
+    heatmap_data = heatmap_data.loc[:, heatmap_data.std() > 0]
+    if heatmap_data.shape[0] < 2 or heatmap_data.shape[1] < 2:
+        st.error(f"{drug_name} ❌ Insufficient heatmap data")
+        return False
+
+    drug_folder = os.path.join(ANALYSIS_FOLDER, drug_name)
+    os.makedirs(drug_folder, exist_ok=True)
+
+    row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
+    col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
+    sns.clustermap(heatmap_data, row_linkage=row_linkage, col_linkage=col_linkage,
+                   cmap='RdBu_r', center=0, linewidths=0.5, figsize=(10, 10))
+    plt.title(f"{drug_name} - Clustering Heatmap")
+    plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"))
+    plt.close()
+
+    up_success = run_enrichment(up_genes, "Upregulated", drug_name, drug_folder)
+    down_success = run_enrichment(down_genes, "Downregulated", drug_name, drug_folder)
+
+    if not (up_success or down_success):
+        shutil.rmtree(drug_folder)
+        st.warning(f"{drug_name} ❌ No enrichment results")
+        return False
+
+    st.success(f"{drug_name} ✅ Analysis complete")
+    return True
+
+# === 🚀 Streamlit App ===
+st.title("🔬 Drug Gene Expression Analyzer")
+
+compound = st.text_input("Enter compound name (e.g. vorinostat):", "vorinostat")
+top_genes = st.number_input("Number of top genes to fetch", min_value=100, max_value=5000, step=100, value=1000)
+
+st.markdown("### ⚙️ Analysis Parameters")
+log2fc_threshold = st.number_input("Log2 Fold Change Threshold (log2FC)", min_value=0.0, max_value=5.0, step=0.1, value=1.0)
+consistency_threshold = st.slider("Minimum Consistency Across Cell Lines (%)", min_value=1, max_value=100, value=50, step=5)
+pvalue_threshold = st.number_input("Significance p-value Threshold", min_value=0.0, max_value=1.0, step=0.01, value=0.05)
+
+if st.button("Run Analysis"):
+    metadata = get_signature_metadata(compound)
+    if not metadata:
+        st.error(f"❌ No metadata found for {compound}")
     else:
-        selected_drug = st.selectbox("Choose a drug to analyze:", list(drug_files_map.keys()))
-        selected_files = drug_files_map[selected_drug]
-        
-        cell_line_data = {}
-        for file_name, file_bytes in selected_files:
-            try:
-                df = pd.read_csv(file_bytes)
-                if " - " in file_name:
-                    cell_line = file_name.split(" - ")[0].replace(".xls", "").strip()
-                else:
-                    cell_line = os.path.splitext(file_name)[0]
-                df = df[df['Significance_pvalue'] <= pvalue_threshold]
-                cell_line_data[cell_line] = df
-            except Exception as e:
-                st.error(f"Error reading {file_name}: {e}")
-
-        if not cell_line_data:
-            st.warning("No valid CSV data was loaded.")
+        sig_ids = [m["SignatureId"] for m in metadata]
+        gene_data = get_signature_data(sig_ids, top_genes)
+        if not gene_data:
+            st.error(f"❌ No gene data for {compound}")
         else:
-            st.success(f"Loaded {len(cell_line_data)} cell lines for drug: {selected_drug}")
-            st.write(list(cell_line_data.keys()))
-
-            # --- MERGE ---
-            gene_dfs = []
-            for cell_line, df in cell_line_data.items():
-                temp = df[['ID_geneid', 'Name_GeneSymbol', 'Value_LogDiffExp']].copy()
-                temp = temp.rename(columns={'Value_LogDiffExp': cell_line})
-                gene_dfs.append(temp)
-
-            merged_df = reduce(lambda left, right: pd.merge(left, right, on=['ID_geneid', 'Name_GeneSymbol'], how='outer'), gene_dfs)
-            merged_df.set_index(['ID_geneid', 'Name_GeneSymbol'], inplace=True)
-
-            # --- FILTER FOR CONSISTENCY ---
-            cell_line_count = len(cell_line_data)
-            min_consistent = int(cell_line_count * (consistency_threshold / 100))
-
-            upregulated_mask = (merged_df > log2fc_threshold).sum(axis=1)
-            downregulated_mask = (merged_df < -log2fc_threshold).sum(axis=1)
-
-            consistently_up_genes = upregulated_mask[upregulated_mask >= min_consistent].index
-            consistently_down_genes = downregulated_mask[downregulated_mask >= min_consistent].index
-
-            st.subheader("📊 Summary")
-            st.write(f"**Total genes in matrix:** {merged_df.shape[0]}")
-            st.write(f"**Genes upregulated in ≥{consistency_threshold}% cell lines:** {len(consistently_up_genes)}")
-            st.write(f"**Genes downregulated in ≥{consistency_threshold}% cell lines:** {len(consistently_down_genes)}")
-
-            # --- HEATMAP ---
-            consistent_genes = consistently_up_genes.union(consistently_down_genes)
-            
-            # Prepare heatmap data
-            heatmap_data = merged_df.loc[consistent_genes].copy()
-            
-            # Clean data: replace Inf with NaN
-            heatmap_data.replace([np.inf, -np.inf], np.nan, inplace=True)
-            
-            # Drop any rows or columns that contain NaNs
-            heatmap_data.dropna(axis=0, how='any', inplace=True)
-            heatmap_data.dropna(axis=1, how='any', inplace=True)
-            
-            # Optional: Alert if heatmap is too small
-            if heatmap_data.shape[0] < 2 or heatmap_data.shape[1] < 2:
-                st.warning("⚠️ Not enough consistent gene expression data to create heatmap.")
-            else:
-                row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
-                col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
-            
-                st.subheader("🧯 Hierarchical Clustering Heatmap")
-                fig = sns.clustermap(
-                    heatmap_data,
-                    row_linkage=row_linkage,
-                    col_linkage=col_linkage,
-                    cmap='RdBu_r',
-                    center=0,
-                    linewidths=0.5,
-                    figsize=(10, 10)
-                )
-                st.pyplot(fig.fig)
-                plt.clf()
-
-            # --- ENRICHMENT ANALYSIS ---
-            st.subheader("🔬 Pathway Enrichment (Enrichr via GSEApy)")
-
-            def run_enrichment(gene_set, label):
-                if len(gene_set) == 0:
-                    st.warning(f"No genes available for enrichment in {label} set.")
-                    return None
-                symbols = [gene[1] for gene in gene_set]
-                try:
-                    enr = gp.enrichr(
-                        gene_list=symbols,
-                        gene_sets=["KEGG_2021_Human", "Reactome_2022", "GO_Biological_Process_2023"],
-                        organism='Human',
-                        outdir=None,
-                        cutoff=0.05
-                    )
-                    if enr.results.empty:
-                        st.info(f"No significant enrichment found for {label}.")
-                    else:
-                        st.write(f"**Top enriched pathways in {label} genes:**")
-                        st.dataframe(enr.results.head(10))
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        barplot(enr.results.sort_values('Adjusted P-value').head(10), title=f"{label} Enrichment", ax=ax)
-                        st.pyplot(fig)
-                except Exception as e:
-                    st.error(f"Error in enrichment analysis for {label}: {e}")
-
-            run_enrichment(consistently_up_genes, "Upregulated")
-            run_enrichment(consistently_down_genes, "Downregulated")
+            gene_df = pd.DataFrame(gene_data)
+            zip_path = os.path.join(OUTPUT_FOLDER, f"{compound.replace(' ', '_')}.zip")
+            save_gene_data_to_zip(metadata, gene_df, zip_path)
+            analyze_gene_data(zip_path, compound, log2fc_threshold, consistency_threshold, pvalue_threshold)
