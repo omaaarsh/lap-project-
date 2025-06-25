@@ -172,21 +172,29 @@ def analyze_zip(zip_path, drug_name):
         os.makedirs(drug_folder, exist_ok=True)
 
         # Save heatmap
+        # Hierarchical clustering
         row_linkage = linkage(pdist(heatmap_data, metric='correlation'), method='average')
         col_linkage = linkage(pdist(heatmap_data.T, metric='correlation'), method='average')
-        fig = sns.clustermap(
+    
+        # Simple but polished heatmap
+        sns.set(font_scale=0.8)  # Smaller font for better fit
+        g = sns.clustermap(
             heatmap_data,
             row_linkage=row_linkage,
             col_linkage=col_linkage,
-            cmap='RdBu_r',
-            center=0,
+            cmap='vlag',            # Simple diverging color palette (blue-white-red)
+            center=0,               # Centered around 0 for log2FC
             linewidths=0.5,
-            figsize=(10, 10)
+            figsize=(15, 15)
         )
-        st.pyplot(fig.fig)
-        plt.title(f"{drug_name} - Hierarchical Clustering Heatmap")
-        plt.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"), bbox_inches='tight')
-        plt.clf()
+    
+        # Add title above the whole figure
+        plt.suptitle(f"{drug_name} - Clustering Heatmap", fontsize=14, y=1.02)
+    
+        # Save clean figure
+        g.savefig(os.path.join(drug_folder, f"{drug_name}_heatmap.png"), dpi=300, bbox_inches='tight')
+        plt.close()
+
 
         up_success = run_enrichment(consistently_up, "Upregulated", drug_name, drug_folder)
         down_success = run_enrichment(consistently_down, "Downregulated", drug_name, drug_folder)
