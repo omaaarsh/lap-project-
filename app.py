@@ -130,7 +130,7 @@ def run_enrichment(gene_index, label, drug_name, output_folder):
 def analyze_zip(zip_path, drug_name):
     cell_line_data = {}
     with zipfile.ZipFile(zip_path, 'r') as zipf:
-        for csv_name in drug_zip.namelist():
+        for csv_name in zipf.namelist():
             if csv_name.endswith(".csv"):
                 try:
                     with drug_zip.open(csv_name) as f:
