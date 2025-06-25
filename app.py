@@ -135,11 +135,12 @@ def analyze_zip(zip_path, drug_name):
                 with zipf.open(csv_name) as f:
                     df = pd.read_csv(f)
                     df = df[df['Significance_pvalue'] <= pvalue_threshold]
-                    cell_line = csv_name.split(" - ")[0].replace(".xls", "").strip()
+                    cell_line = csv_name.split(" - ")[0].replace("Camptothecin", "").replace(".xls", "").strip()
                     cell_line_data[cell_line] = df
-    if not cell_line_data:
-        return False
 
+    if not cell_line_data:
+        print(f"{drug_name} ❌ No valid cell line data")
+        return False
     gene_dfs = []
     for cell_line, df in cell_line_data.items():
         temp = df[['ID_geneid', 'Name_GeneSymbol', 'Value_LogDiffExp']].copy()
