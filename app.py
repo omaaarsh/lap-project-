@@ -93,7 +93,7 @@ def save_gene_data_to_zip(metadata, gene_df, output_zip_path):
             matched = gene_df[gene_df['signatureID'] == sig_id]
             if matched.empty:
                 continue
-            filename = f"{perturbagen}_{tissue}_{cell_line}-{perturbagen}_{tissue}_{cell_line}.csv"
+            filename = f"{perturbagen}_{tissue}_{cell_line}.csv"
             print(filename)
             zipf.writestr(filename, matched.to_csv(index=False).encode('utf-8'))
     with open(output_zip_path, "wb") as f:
