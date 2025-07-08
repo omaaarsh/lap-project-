@@ -16,7 +16,7 @@ import gseapy as gp
 from gseapy.plot import barplot
 
 # === 📁 FOLDERS ===
-OUTPUT_FOLDER = "output_zips"
+OUTPUT_FOLDER = "omar_zips"
 ANALYSIS_FOLDER = "drug_Analysis_results"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(ANALYSIS_FOLDER, exist_ok=True)
